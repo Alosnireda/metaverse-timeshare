@@ -3,6 +3,12 @@
 (define-constant err-not-authorized (err u100))
 (define-constant err-property-exists (err u101))
 (define-constant err-invalid-time-slot (err u102))
+(define-constant err-invalid-property-id (err u103))
+(define-constant err-invalid-price (err u104))
+(define-constant err-invalid-slots (err u105))
+(define-constant max-property-id u1000000)
+(define-constant max-price u1000000000)
+(define-constant max-slots u100)
 
 ;; Define data structures
 (define-map properties
@@ -15,50 +21,95 @@
     { owner: principal, start-time: uint, end-time: uint, price: uint }
 )
 
+;; Validation functions
+(define-private (is-valid-property-id (property-id uint))
+    (and 
+        (> property-id u0)
+        (<= property-id max-property-id)
+        (is-none (map-get? properties { property-id: property-id }))
+    )
+)
+
+(define-private (is-valid-price (price uint))
+    (and 
+        (> price u0)
+        (<= price max-price)
+    )
+)
+
+(define-private (is-valid-slots (slots uint))
+    (and 
+        (> slots u0)
+        (<= slots max-slots)
+    )
+)
+
+(define-private (is-valid-slot-id (property-id uint) (slot-id uint))
+    (match (map-get? properties { property-id: property-id })
+        property (< slot-id (get total-slots property))
+        false
+    )
+)
+
 ;; Create new VR property
 (define-public (create-property (property-id uint) (base-price uint) (total-slots uint))
     (let ((sender tx-sender))
-        (if (is-authorized sender)
-            (begin
-                (map-insert properties
-                    { property-id: property-id }
-                    { owner: sender, 
-                      base-price: base-price, 
-                      total-slots: total-slots }
-                )
-                (ok true))
-            err-not-authorized
-        )
+        (asserts! (is-authorized sender) err-not-authorized)
+        (asserts! (is-valid-property-id property-id) err-invalid-property-id)
+        (asserts! (is-valid-price base-price) err-invalid-price)
+        (asserts! (is-valid-slots total-slots) err-invalid-slots)
+        (ok (map-insert properties
+            { property-id: property-id }
+            { owner: sender, 
+              base-price: base-price, 
+              total-slots: total-slots }
+        ))
     )
 )
 
 ;; Purchase time slot
 (define-public (purchase-time-slot (property-id uint) (slot-id uint))
-    (let ((slot (unwrap! (map-get? time-slots 
-                            { property-id: property-id, slot-id: slot-id })
-                        err-invalid-time-slot))
-          (sender tx-sender))
-        (if (is-time-slot-available property-id slot-id)
-            (begin
-                (try! (stx-transfer? (get price slot) sender (get owner slot)))
-                (map-set time-slots
-                    { property-id: property-id, slot-id: slot-id }
-                    { owner: sender,
-                      start-time: (get start-time slot),
-                      end-time: (get end-time slot),
-                      price: (get price slot) }
+    (let ((sender tx-sender))
+        (asserts! (is-valid-slot-id property-id slot-id) err-invalid-time-slot)
+        (match (map-get? time-slots { property-id: property-id, slot-id: slot-id })
+            slot 
+                (if (is-time-slot-available property-id slot-id)
+                    (begin
+                        (try! (stx-transfer? (get price slot) sender (get owner slot)))
+                        (ok (map-set time-slots
+                            { property-id: property-id, slot-id: slot-id }
+                            { owner: sender,
+                              start-time: (get start-time slot),
+                              end-time: (get end-time slot),
+                              price: (get price slot) }
+                        ))
+                    )
+                    err-invalid-time-slot
                 )
-                (ok true))
             err-invalid-time-slot
         )
     )
 )
 
+;; Check if time slot is valid for current time
+(define-private (check-time-slot (slot-entry {
+    owner: principal,
+    start-time: uint,
+    end-time: uint,
+    price: uint
+}) (user principal))
+    (and 
+        (is-eq (get owner slot-entry) user)
+        (>= block-height (get start-time slot-entry))
+        (<= block-height (get end-time slot-entry)))
+)
+
 ;; Check if user has access to property at current time
 (define-read-only (has-access (property-id uint) (user principal))
-    (let ((current-time block-height))
-        (filter check-time-slot
-            (map-get? time-slots { property-id: property-id })
+    (let ((slot (map-get? time-slots { property-id: property-id, slot-id: u0 })))
+        (match slot
+            time-slot (check-time-slot time-slot user)
+            false
         )
     )
 )
@@ -69,9 +120,8 @@
 )
 
 (define-private (is-time-slot-available (property-id uint) (slot-id uint))
-    (let ((slot (unwrap! (map-get? time-slots 
-                            { property-id: property-id, slot-id: slot-id })
-                        false)))
-        (is-none (get owner slot))
+    (match (map-get? time-slots { property-id: property-id, slot-id: slot-id })
+        slot false  ;; If slot exists, it's not available
+        true    ;; If slot doesn't exist, it's available
     )
 )
